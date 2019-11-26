@@ -15,7 +15,7 @@ import argparse
 
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--model_name', type = str, default = 'LSTM', help = 'name of the model')
+parser.add_argument('--model_name', type = str, default = 'BiLSTM', help = 'name of the model')
 parser.add_argument('--save_name', type = str)
 
 parser.add_argument('--train_prefix', type = str, default = 'train')
@@ -38,5 +38,7 @@ con = config.Config(args)
 #con.load_train_data()
 con.load_test_data()
 # con.set_train_model()
-pretrain_model_name = 'checkpoint_BiLSTM_bert_relation_exist_cls'
+#pretrain_model_name = 'checkpoint_BiLSTM_bert_relation_exist_cls'
+pretrain_model_name = '/remote-home/tji/pycharm/docred_wh/DocRed-1/checkpoint/checkpoint_BiLSTM'
+
 con.testall(model[args.model_name], args.save_name, args.input_theta, args.two_phase, pretrain_model_name)#, args.ignore_input_theta)

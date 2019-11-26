@@ -7,7 +7,7 @@ from pytorch_transformers import *
 from models.bert import Bert
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--in_path', type = str, default =  "../data")
+parser.add_argument('--in_path', type = str, default = "data")
 parser.add_argument('--out_path', type = str, default = "prepro_data")
 
 args = parser.parse_args()
@@ -175,6 +175,7 @@ def init(data_file_name, rel2id, max_length = 512, is_training = True, suffix=''
         for sent in item['sents']:
             words += sent
 
+        # lower()???
         bert_token[i], bert_mask[i], bert_starts[i] = bert.subword_tokenize_to_ids(words)
 
         for j, word in enumerate(words):

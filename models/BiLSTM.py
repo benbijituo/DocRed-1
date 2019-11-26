@@ -59,15 +59,26 @@ class BiLSTM(nn.Module):
         self.bert = BertModel.from_pretrained('bert-base-uncased')
         #self.linear_re = nn.Linear(bert_hidden_size+config.coref_size+config.entity_type_size, hidden_size)
         self.linear_re = nn.Linear(bert_hidden_size, hidden_size)
+        #self.linear_re_type = nn.Linear(bert_hidden_size + config.entity_type_size, hidden_size)
         #self.ent_att_enc = SimpleEncoder(hidden_size*2, 4, 1)
+
+        self.bili_input = hidden_size
+        self.use_entity_type_after_li_re = False # concat entity type feature after linear_re
+        if self.use_entity_type and self.use_entity_type_after_li_re:
+            self.bili_input = hidden_size + config.entity_type_size
+
+        self.use_entity_type_before_li_re = False
+        if self.use_entity_type and self.use_entity_type_before_li_re:
+            self.linear_re = nn.Linear(bert_hidden_size + config.entity_type_size, hidden_size)
+
 
         if self.use_distance:
             self.dis_embed = nn.Embedding(20, config.dis_size, padding_idx=10)
-            self.bili = torch.nn.Bilinear(hidden_size+config.dis_size, hidden_size+config.dis_size, config.relation_num)
+            self.bili = torch.nn.Bilinear(self.bili_input+config.dis_size, self.bili_input+config.dis_size, config.relation_num)
             #self.linear_re = nn.Linear((hidden_size+config.dis_size)*2, config.relation_num)
         else:
             #self.linear_re = nn.Linear(hidden_size*2, config.relation_num)
-            self.bili = torch.nn.Bilinear(hidden_size, hidden_size, config.relation_num)
+            self.bili = torch.nn.Bilinear(self.bili_input, self.bili_input, config.relation_num)
 
     def mask_lengths(self, batch_size, doc_size, lengths):
         masks = torch.ones(batch_size, doc_size).cuda()
@@ -113,13 +124,17 @@ class BiLSTM(nn.Module):
         context_output = self.bert(context_idxs, attention_mask=context_masks)[0]
         #print('output_1',context_output[0])
         context_output = [layer[starts.nonzero().squeeze(1)]
-                   for layer, starts in zip(context_output, context_starts)]
-        #print('output_2',context_output[0])
-        context_output = pad_sequence(context_output, batch_first=True, padding_value=-1)
+                   for layer, starts in zip(context_output, context_starts)] #only take the first sub-token within a word
+        #how to fully use all the representation of sub-token???
+        #context_output = [get_whole_token_repre(layer, starts) # wrong
+        #                  for layer, starts in zip(context_output, context_starts)]
+
+        #print('output_2',context_output[0]) # context_output.size()[batch_size, num_of_words, dim]
+        context_output = pad_sequence(context_output, batch_first=True, padding_value=-1) #this pad operation only pad the part less than the max length within this batch
         #print('output_3',context_output[0])
         #print(context_output.size())
-        context_output = torch.nn.functional.pad(context_output,(0,0,0,context_idxs.size(-1)-context_output.size(-2)))
-        #print('output_4',context_output[0])
+        context_output = torch.nn.functional.pad(context_output,(0,0,0,context_idxs.size(-1)-context_output.size(-2))) #this pad operation pad the part less than the max length 512
+        #print('output_4',context_output[0]) # context_output.size()[batch_size, max_length, dim]
         #print(context_output.size())
         #assert(False)
         #context_output = self.rnn(sent, context_lens)
@@ -143,14 +158,24 @@ class BiLSTM(nn.Module):
         '''
         if self.use_coreference:
             context_output = torch.cat([context_output, self.entity_embed(pos)], dim=-1)
-
+        '''
+        '''
         if self.use_entity_type:
             context_output = torch.cat([context_output, self.ner_emb(context_ner)], dim=-1)
         '''
-        context_output = self.linear_re(context_output)
+        #context_output = self.linear_re(context_output)
+        #context_output = self.linear_re_type(context_output)
+        context_output = torch.relu(self.linear_re(context_output))
 
+        # h_mapping[batchs_size, num_of_train_triple, max_length(512)]
+        # context_output.size()[batch_size, max_length, dim]
+        # concat entity type feature after linear_re(have to change bili)
+        '''
+        if self.use_entity_type_after_li_re:
+            context_output = torch.cat([context_output, self.ner_emb(context_ner)], dim=-1)
+        '''
 
-        start_re_output = torch.matmul(h_mapping, context_output)
+        start_re_output = torch.matmul(h_mapping, context_output) # start_re_output.size():[batch_size, num_of_triples, dim]
         end_re_output = torch.matmul(t_mapping, context_output)
 
 
@@ -169,7 +194,7 @@ class BiLSTM(nn.Module):
 
         #print(predict_re[0])
 
-        return predict_re
+        return predict_re #
 
 
 class LockedDropout(nn.Module):
@@ -245,9 +270,6 @@ class EncoderRNN(nn.Module):
         if self.concat:
             return torch.cat(outputs, dim=2)
         return outputs[-1]
-
-
-
 
 class EncoderLSTM(nn.Module):
     def __init__(self, input_size, num_units, nlayers, concat, bidir, dropout, return_last):
@@ -349,3 +371,38 @@ class BiAttention(nn.Module):
         output_two = torch.bmm(weight_two, input)
 
         return torch.cat([input, output_one, input*output_one, output_two*output_one], dim=-1)
+
+
+def get_whole_token_repre(layer, starts):
+    combine_sub = torch.zeros(int(torch.sum(starts).item()))
+    acc = 0
+    acc_times = 0
+    acc_num = 0  # num of combined_sub
+    for i in range(len(starts)):
+        if starts[i] != 0:
+            acc += layer[i]
+            acc_times += 1
+
+            if (i == len(starts) - 1 or (((i + 1) < len(starts)) and (starts[i + 1] != 0))):
+                # combine_sub.append(acc/acc_times)
+                combine_sub[acc_num] = torch.Tensor([acc / acc_times])
+                acc = 0
+                acc_times = 0
+                acc_num += 1
+                continue
+
+            j = i + 1
+            while ((j < len(starts)) and (starts[j] == 0)):
+                acc += layer[j]
+                acc_times += 1
+                j = j + 1
+
+        else:
+            if (acc != 0):
+                # combine_sub.append(acc/acc_times)
+                combine_sub[acc_num] = torch.Tensor([acc / acc_times])
+                acc_num += 1
+                acc = 0
+                acc_times = 0
+
+    return combine_sub

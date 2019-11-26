@@ -17,7 +17,7 @@ import matplotlib.pyplot as plt
 import random
 from collections import defaultdict
 import torch.nn.functional as F
-
+import models
 
 IGNORE_INDEX = -100
 is_transformer = False
@@ -47,6 +47,7 @@ class Config(object):
         self.data_path = './prepro_data'
         self.use_bag = False
         self.use_gpu = True
+        self.gradient_accumulation_steps = 2
         self.is_training = True
         self.max_length = 512
         self.pos_num = 2 * self.max_length
@@ -61,6 +62,7 @@ class Config(object):
 
         self.checkpoint_dir = './checkpoint'
         self.fig_result_dir = './fig_result'
+        self.save_epoch = 1
         self.test_epoch = 5
         self.pretrain_model = None
 
@@ -72,7 +74,7 @@ class Config(object):
 
         self.period = 50
 
-        self.batch_size = 30
+        self.batch_size = 16
         #self.test_batch_size = 40
         self.h_t_limit = 1800
 
@@ -102,6 +104,8 @@ class Config(object):
 
     def set_data_path(self, data_path):
         self.data_path = data_path
+    def set_fig_result_dir(self, fig_result_dir):
+        self.fig_result_dir = fig_result_dir
     def set_max_length(self, max_length):
         self.max_length = max_length
         self.pos_num = 2 * self.max_length
@@ -192,6 +196,12 @@ class Config(object):
 
         self.test_order = list(range(self.test_len))
         self.test_order.sort(key=lambda x: np.sum(self.data_test_word[x] > 0), reverse=True)
+
+    def load_small_train_data(self):
+        pass
+
+    def load_small_test_data(self):
+        pass
 
     def combine_sents(self, h_idx, t_idx, vertexSet, sents_idx):
         h_t_sent = []
@@ -371,23 +381,23 @@ class Config(object):
             #print(sent_idxs, sent_idxs.size())
             #print(sent_lengths, sent_lengths.size())
 
-            yield {'context_idxs': context_idxs[:cur_bsz, :max_c_len].contiguous(),
-                   'context_pos': context_pos[:cur_bsz, :max_c_len].contiguous(),
-                   'h_mapping': h_mapping[:cur_bsz, :max_h_t_cnt, :max_c_len],
-                   't_mapping': t_mapping[:cur_bsz, :max_h_t_cnt, :max_c_len],
-                   'relation_label': relation_label[:cur_bsz, :max_h_t_cnt].contiguous(),
+            yield {'context_idxs': context_idxs[:cur_bsz, :max_c_len].contiguous(), # bert_subword_id
+                   'context_pos': context_pos[:cur_bsz, :max_c_len].contiguous(), # entity id in vertexSet
+                   'h_mapping': h_mapping[:cur_bsz, :max_h_t_cnt, :max_c_len], # head entity pos of a triple
+                   't_mapping': t_mapping[:cur_bsz, :max_h_t_cnt, :max_c_len], # tail entity pos of a triple
+                   'relation_label': relation_label[:cur_bsz, :max_h_t_cnt].contiguous(), # relation of triple
                    'input_lengths' : input_lengths,
-                   'pos_idx': pos_idx[:cur_bsz, :max_c_len].contiguous(),
+                   'pos_idx': pos_idx[:cur_bsz, :max_c_len].contiguous(), # sequential idx from 0 to sent_length
                    'relation_multi_label': relation_multi_label[:cur_bsz, :max_h_t_cnt],
-                   'relation_mask': relation_mask[:cur_bsz, :max_h_t_cnt],
-                   'context_ner': context_ner[:cur_bsz, :max_c_len].contiguous(),
+                   'relation_mask': relation_mask[:cur_bsz, :max_h_t_cnt], # mask=1 if triple is sampled
+                   'context_ner': context_ner[:cur_bsz, :max_c_len].contiguous(), # named entity id for entity
                    'context_char_idxs': context_char_idxs[:cur_bsz, :max_c_len].contiguous(),
-                   'ht_pair_pos': ht_pair_pos[:cur_bsz, :max_h_t_cnt],
-                   'sent_idxs': sent_idxs[:cur_bsz],
+                   'ht_pair_pos': ht_pair_pos[:cur_bsz, :max_h_t_cnt], # distance between entity pair
+                   'sent_idxs': sent_idxs[:cur_bsz], #???
                    'sent_lengths': sent_lengths[:cur_bsz],
-                   'reverse_sent_idxs': reverse_sent_idxs[:cur_bsz, :max_c_len],
-                   'context_masks': context_masks[:cur_bsz, :max_c_len].contiguous(),
-                   'context_starts': context_starts[:cur_bsz, :max_c_len].contiguous(),
+                   'reverse_sent_idxs': reverse_sent_idxs[:cur_bsz, :max_c_len], #???
+                   'context_masks': context_masks[:cur_bsz, :max_c_len].contiguous(), # bert mask
+                   'context_starts': context_starts[:cur_bsz, :max_c_len].contiguous(), # start subtoken index of original token
                    }
 
     def get_test_batch(self):
@@ -569,6 +579,7 @@ class Config(object):
             self.acc_not_NA.clear()
             self.acc_total.clear()
 
+            step_in_epoch = 0
             for data in self.get_train_batch():
 
                 context_idxs = data['context_idxs']
@@ -593,17 +604,28 @@ class Config(object):
                 dis_h_2_t = ht_pair_pos+10
                 dis_t_2_h = -ht_pair_pos+10
 
+                if not isinstance(ori_model, models.OriBiLSTM):
+                    predict_re = model(context_idxs, context_pos, context_ner, context_char_idxs, input_lengths, h_mapping, t_mapping, relation_mask, dis_h_2_t, dis_t_2_h, sent_idxs, sent_lengths, reverse_sent_idxs, context_masks, context_starts)
+                else:
+                    predict_re = model(context_idxs, context_pos, context_ner, context_char_idxs, None,
+                                       h_mapping, t_mapping, relation_mask, dis_h_2_t, dis_t_2_h)
 
-                predict_re = model(context_idxs, context_pos, context_ner, context_char_idxs, input_lengths, h_mapping, t_mapping, relation_mask, dis_h_2_t, dis_t_2_h, sent_idxs, sent_lengths, reverse_sent_idxs, context_masks, context_starts)
                 loss = torch.sum(BCE(predict_re, relation_multi_label)*relation_mask.unsqueeze(2)) /  (self.relation_num * torch.sum(relation_mask))
-
+                # predict_re.size():[batch_size, num_of_train_triples, relation_num]
+                # relation_mask.size():[batch_size, num_of_train_triples, mask_value] mask_v=1 if triple is sampled
+                # sum the loss if the triple is sampled
 
                 output = torch.argmax(predict_re, dim=-1)
                 output = output.data.cpu().numpy()
 
-                optimizer.zero_grad()
+
                 loss.backward()
-                optimizer.step()
+
+                if (step_in_epoch + 1) % self.gradient_accumulation_steps == 0:
+                    optimizer.step()
+                    optimizer.zero_grad()
+                step_in_epoch = step_in_epoch + 1
+
 
                 relation_label = relation_label.data.cpu().numpy()
 
@@ -653,6 +675,10 @@ class Config(object):
                     plt.legend(loc="upper right")
                     plt.savefig(os.path.join("fig_result", model_name))
 
+            if (epoch+1) % self.save_epoch == 0:
+                path = os.path.join(self.checkpoint_dir, model_name+"_"+str(epoch))
+                torch.save(ori_model.state_dict(), path)
+
         print("Finish training")
         print("Best epoch = %d | auc = %f" % (best_epoch, best_auc))
         print("Storing best result...")
@@ -675,8 +701,11 @@ class Config(object):
             if print_:
                 print(s)
             if log_:
-                with open(os.path.join(os.path.join("log", model_name)), 'a+') as f_log:
-                    f_log.write(s + '\n')
+                if os.path.exists(os.path.join("log", model_name)):
+                    with open(os.path.join(os.path.join("log", model_name)), 'a+') as f_log:
+                        f_log.write(s + '\n')
+                else:
+                    print("No logging in file")
 
 
 
@@ -878,6 +907,7 @@ class Config(object):
         model.eval()
         #self.test_anylyse(model, model_name, True, input_theta)
         f1, auc, pr_x, pr_y = self.test(model, model_name, True, input_theta, two_phase, pretrain_model)
+        print("Finish testall")
 
     def add_attr(self, attr_list, key, values):
         for i, v in enumerate(values):
