@@ -35,7 +35,6 @@ model = {
     'LSTM': models.LSTM,
     'BiLSTM': models.BiLSTM,
     'ContextAware': models.ContextAware,
-    'OriBiLSTM': models.OriBiLSTM,
 }
 
 seed = 22
@@ -57,6 +56,9 @@ print("fig result dir: ", con.fig_result_dir)
 
 con.load_train_data()
 con.load_test_data()
+print("Finish loading train and test data")
+#con.load_small_train_data()
+#con.load_small_test_data()
 # con.set_train_model()
 
 con.train(model[args.model_name], args.save_name)

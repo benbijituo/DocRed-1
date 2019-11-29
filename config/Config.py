@@ -74,7 +74,7 @@ class Config(object):
 
         self.period = 50
 
-        self.batch_size = 16
+        self.batch_size = 15
         #self.test_batch_size = 40
         self.h_t_limit = 1800
 
@@ -196,12 +196,6 @@ class Config(object):
 
         self.test_order = list(range(self.test_len))
         self.test_order.sort(key=lambda x: np.sum(self.data_test_word[x] > 0), reverse=True)
-
-    def load_small_train_data(self):
-        pass
-
-    def load_small_test_data(self):
-        pass
 
     def combine_sents(self, h_idx, t_idx, vertexSet, sents_idx):
         h_t_sent = []
@@ -493,7 +487,7 @@ class Config(object):
                 label_set = {}
                 evi_num_set = {}
                 for label in ins['labels']:
-                    label_set[(label['h'], label['t'], label['r'])] = label['in'+self.train_prefix]
+                    label_set[(label['h'], label['t'], label['r'])] = label['in'+self.train_prefix] # label_triple + if in train dataset
                     evi_num_set[(label['h'], label['t'], label['r'])] = len(label['evidence'])
 
                 labels.append(label_set)
@@ -522,7 +516,7 @@ class Config(object):
                    'relation_mask': relation_mask[:cur_bsz, :max_h_t_cnt],
                    'titles': titles,
                    'ht_pair_pos': ht_pair_pos[:cur_bsz, :max_h_t_cnt],
-                   'indexes': indexes,
+                   'indexes': indexes, # absolute index of all data
                    'sent_idxs': sent_idxs[:cur_bsz],
                    'sent_lengths': sent_lengths[:cur_bsz],
                    'reverse_sent_idxs': reverse_sent_idxs[:cur_bsz, :max_c_len],
@@ -542,6 +536,7 @@ class Config(object):
         optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=1e-5)
         # nll_average = nn.CrossEntropyLoss(size_average=True, ignore_index=IGNORE_INDEX)
         BCE = nn.BCEWithLogitsLoss(reduction='none')
+        criterion = nn.CrossEntropyLoss(reduction='none')
 
         if not os.path.exists(self.checkpoint_dir):
             os.mkdir(self.checkpoint_dir)
@@ -600,24 +595,36 @@ class Config(object):
                 context_masks = data['context_masks']
                 context_starts = data['context_starts']
 
-
                 dis_h_2_t = ht_pair_pos+10
                 dis_t_2_h = -ht_pair_pos+10
 
-                if not isinstance(ori_model, models.OriBiLSTM):
-                    predict_re = model(context_idxs, context_pos, context_ner, context_char_idxs, input_lengths, h_mapping, t_mapping, relation_mask, dis_h_2_t, dis_t_2_h, sent_idxs, sent_lengths, reverse_sent_idxs, context_masks, context_starts)
-                else:
-                    predict_re = model(context_idxs, context_pos, context_ner, context_char_idxs, None,
-                                       h_mapping, t_mapping, relation_mask, dis_h_2_t, dis_t_2_h)
+                predict_re = model(context_idxs, context_pos, context_ner, context_char_idxs, input_lengths, h_mapping, t_mapping, relation_mask, dis_h_2_t, dis_t_2_h, sent_idxs, sent_lengths, reverse_sent_idxs, context_masks, context_starts)
 
-                loss = torch.sum(BCE(predict_re, relation_multi_label)*relation_mask.unsqueeze(2)) /  (self.relation_num * torch.sum(relation_mask))
+                #loss = torch.sum(BCE(predict_re, relation_multi_label)*relation_mask.unsqueeze(2)) /  (self.relation_num * torch.sum(relation_mask))
                 # predict_re.size():[batch_size, num_of_train_triples, relation_num]
                 # relation_mask.size():[batch_size, num_of_train_triples, mask_value] mask_v=1 if triple is sampled
                 # sum the loss if the triple is sampled
 
+
+                # change it to single label and softmax loss funtion
+                relation_single_label = self.change_to_single_label(relation_multi_label)
+                temp_bsz = relation_single_label.size(0)
+                temp_ht_num = relation_single_label.size(1)
+                relation_single_label = relation_single_label.reshape(temp_bsz * temp_ht_num).long().cuda()
+                predict_re = predict_re.reshape(temp_bsz * temp_ht_num, -1)
+                #print("predict_re: ", predict_re.size())
+                #print("relation_single_label: ", relation_single_label.size())
+
+                #mean loss
+                loss = criterion(predict_re, relation_single_label)
+                #/torch.sum(relation_mask)/self.batch_size # default crossentropy is mean
+                relation_mask = relation_mask.reshape(temp_bsz * temp_ht_num)
+                loss = torch.sum((loss * relation_mask))/torch.sum(relation_mask)
+
+                predict_re = predict_re.reshape(temp_bsz, temp_ht_num, -1)
+
                 output = torch.argmax(predict_re, dim=-1)
                 output = output.data.cpu().numpy()
-
 
                 loss.backward()
 
@@ -653,15 +660,14 @@ class Config(object):
                     start_time = time.time()
 
 
-
             if (epoch+1) % self.test_epoch == 0:
-                logging('-' * 89)
+                logging('-' * 100)
                 eval_start_time = time.time()
                 model.eval()
                 f1, auc, pr_x, pr_y = self.test(model, model_name)
                 model.train()
                 logging('| epoch {:3d} | time: {:5.2f}s'.format(epoch, time.time() - eval_start_time))
-                logging('-' * 89)
+                logging('-' * 100)
 
 
                 if f1 > best_f1:
@@ -674,6 +680,11 @@ class Config(object):
                     plt.plot(pr_x, pr_y, lw=2, label=str(epoch))
                     plt.legend(loc="upper right")
                     plt.savefig(os.path.join("fig_result", model_name))
+                    '''
+                    if not os.path.exists(self.fig_result_dir):
+                        os.mkdir(self.fig_result_dir)
+                    plt.savefig(os.path.join(self.fig_result_dir, model_name))
+                    '''
 
             if (epoch+1) % self.save_epoch == 0:
                 path = os.path.join(self.checkpoint_dir, model_name+"_"+str(epoch))
@@ -741,16 +752,19 @@ class Config(object):
                 predict_re = model(context_idxs, context_pos, context_ner, context_char_idxs, input_lengths,
                                    h_mapping, t_mapping, relation_mask, dis_h_2_t, dis_t_2_h, sent_idxs, sent_lengths, reverse_sent_idxs, context_masks, context_starts)
 
-                predict_re = torch.sigmoid(predict_re)
+                #predict_re = torch.sigmoid(predict_re)
+
+                # change it to single label and softmax loss funtion
+                out_select = nn.Softmax(dim=-1)
+                predict_re = out_select(predict_re)
 
             predict_re = predict_re.data.cpu().numpy()
             if two_phase:
                 is_rel_exist = is_rel_exist.cpu().numpy()
 
             for i in range(len(labels)):
-                label = labels[i]
+                label = labels[i] # label->{triple_tuple(h,t,r):if_in_train_dataset}
                 index = indexes[i]
-
 
                 total_recall += len(label)
                 for l in label.values():
@@ -804,7 +818,7 @@ class Config(object):
                 eval_start_time = time.time()
 
         # test_result_ignore.sort(key=lambda x: x[1], reverse=True)
-        test_result.sort(key = lambda x: x[1], reverse=True)
+        test_result.sort(key = lambda x: x[1], reverse=True) # used for get PR
 
         print ('total_recall', total_recall)
         print('predicted as zero', predicted_as_zero)
@@ -826,7 +840,7 @@ class Config(object):
             total_recall = 1  # for test
 
         for i, item in enumerate(test_result):
-            correct += item[0]
+            correct += item[0] # if item[0] is not in label, no new x, only new y
             pr_y.append(float(correct) / (i + 1))
             pr_x.append(float(correct) / total_recall)
             if item[1] > input_theta:
@@ -890,8 +904,6 @@ class Config(object):
 
         return f1, auc, pr_x, pr_y
 
-
-
     def testall(self, model_pattern, model_name, input_theta, two_phase=False, pretrain_model_name=None):#, ignore_input_theta):
         pretrain_model = None
         if two_phase:
@@ -907,6 +919,8 @@ class Config(object):
         model.eval()
         #self.test_anylyse(model, model_name, True, input_theta)
         f1, auc, pr_x, pr_y = self.test(model, model_name, True, input_theta, two_phase, pretrain_model)
+
+        #self.my_test(model, model_name, True, input_theta, two_phase, pretrain_model)
         print("Finish testall")
 
     def add_attr(self, attr_list, key, values):
@@ -1041,3 +1055,243 @@ class Config(object):
                 print(np.mean(attr))
             print(len(attr_list[k][0]))
         json.dump(test_result, open('analyse_result.json','w'))
+
+    def change_to_single_label(self, relation_multi_label):
+        relation_single_label = torch.Tensor(relation_multi_label.size(0), relation_multi_label.size(1))
+        for i in range(relation_single_label.size(0)):
+            for j in range(relation_single_label.size(1)):
+                relation_single_label[i, j] = relation_multi_label[i, j].argmax()
+        return relation_single_label
+
+    def my_test(self, model, model_name, output=False, input_theta=-1, two_phase=False, pretrain_model=None):
+        print("test file: ", os.path.join(self.data_path, self.test_prefix+'.json'))
+
+        data_idx = 0
+        eval_start_time = time.time()
+        # test_result_ignore = []
+        total_recall_ignore = 0
+
+        test_result = []
+        total_recall = 0
+        top1_acc = have_label = 0
+
+        predicted_as_zero = 0
+        total_ins_num = 0
+
+        def logging(s, print_=True, log_=True):
+            if print_:
+                print(s)
+            if log_:
+                if os.path.exists(os.path.join("log", model_name)):
+                    with open(os.path.join(os.path.join("log", model_name)), 'a+') as f_log:
+                        f_log.write(s + '\n')
+                else:
+                    print("No logging in file")
+
+        for data in self.get_test_batch():
+            with torch.no_grad():
+                context_idxs = data['context_idxs']
+                context_pos = data['context_pos']
+                h_mapping = data['h_mapping']
+                t_mapping = data['t_mapping']
+                labels = data['labels']
+                L_vertex = data['L_vertex']
+                input_lengths =  data['input_lengths']
+                context_ner = data['context_ner']
+                context_char_idxs = data['context_char_idxs']
+                relation_mask = data['relation_mask']
+                ht_pair_pos = data['ht_pair_pos']
+                sent_idxs = data['sent_idxs']
+                sent_lengths = data['sent_lengths']
+                reverse_sent_idxs = data['reverse_sent_idxs']
+                context_masks = data['context_masks']
+                context_starts = data['context_starts']
+
+                titles = data['titles']
+                indexes = data['indexes']
+
+                dis_h_2_t = ht_pair_pos+10
+                dis_t_2_h = -ht_pair_pos+10
+
+                #print("len(labels): ", len(labels)) # batch_size
+                #print(labels) # {} * batch_size
+
+                if two_phase:
+                    is_rel_exist = pretrain_model(context_idxs, context_pos, context_ner, context_char_idxs, input_lengths,
+                                   h_mapping, t_mapping, relation_mask, dis_h_2_t, dis_t_2_h, sent_idxs, sent_lengths, reverse_sent_idxs, context_masks, context_starts)
+
+                predict_re = model(context_idxs, context_pos, context_ner, context_char_idxs, input_lengths,
+                                   h_mapping, t_mapping, relation_mask, dis_h_2_t, dis_t_2_h, sent_idxs, sent_lengths, reverse_sent_idxs, context_masks, context_starts)
+
+                #predict_re = torch.sigmoid(predict_re)
+
+                # change it to single label and softmax loss funtion
+                out_select = nn.Softmax(dim=-1)
+                predict_re = out_select(predict_re)
+
+                #print("batch_size: ", predict_re.size()[0])
+                #print("L_vertex: ", L_vertex)
+                #print("h_t_pair: ", predict_re[0].size(0)) # max num in L_vertex^2
+
+            #predict_re:[batch_size, num_h_t_pair, num_relation]
+            predict_re = predict_re.data.cpu().numpy()
+
+            for i in range(len(labels)): # batch_size
+                label = labels[i]
+                index = indexes[i]
+
+                total_recall += len(label)
+                for l in label.values():
+                    if not l:
+                        total_recall_ignore += 1
+
+                L = L_vertex[i]
+                j = 0
+                for h_idx in range(L): # all
+                    for t_idx in range(L):
+                        if h_idx != t_idx:
+                            r = np.argmax(predict_re[i, j])
+                            intrain = False
+                            if r!=0:
+                                test_result.append(((h_idx, t_idx, r) in label, float(predict_re[i, j, r]), intrain,
+                                                    titles[i], self.id2rel[r], index, h_idx, t_idx, r))
+                            j += 1
+
+            if data_idx % self.period == 0:
+                print('| step {:3d} | time: {:5.2f}'.format(data_idx // self.period, (time.time() - eval_start_time)))
+                eval_start_time = time.time()
+        if output:
+            output = [{'index': int(x[-4]), 'h_idx': int(x[-3]), 't_idx': int(x[-2]), 'r_idx': int(x[-1]), 'r': str(x[-5]), 'title': str(x[-6])} for x
+                      in test_result]
+            json.dump(output, open(self.test_prefix + "_index.json", "w"))
+        return
+
+    def my_get_test_batch(self):
+        context_idxs = torch.LongTensor(self.test_batch_size, self.max_length).cuda()
+        context_pos = torch.LongTensor(self.test_batch_size, self.max_length).cuda()
+        h_mapping = torch.Tensor(self.test_batch_size, self.test_relation_limit, self.max_length).cuda()
+        t_mapping = torch.Tensor(self.test_batch_size, self.test_relation_limit, self.max_length).cuda()
+        context_ner = torch.LongTensor(self.test_batch_size, self.max_length).cuda()
+        context_char_idxs = torch.LongTensor(self.test_batch_size, self.max_length, self.char_limit).cuda()
+        relation_mask = torch.Tensor(self.test_batch_size, self.h_t_limit).cuda()
+        ht_pair_pos = torch.LongTensor(self.test_batch_size, self.h_t_limit).cuda()
+        sent_idxs = torch.LongTensor(self.test_batch_size, self.sent_limit, self.word_size).cuda()
+        reverse_sent_idxs = torch.LongTensor(self.test_batch_size, self.max_length).cuda()
+
+        context_masks = torch.LongTensor(self.test_batch_size, self.max_length).cuda()
+        context_starts = torch.LongTensor(self.test_batch_size, self.max_length).cuda()
+
+        for b in range(self.test_batches):
+            start_id = b * self.test_batch_size
+            cur_bsz = min(self.test_batch_size, self.test_len - start_id)
+            cur_batch = list(self.test_order[start_id: start_id + cur_bsz])
+
+            for mapping in [h_mapping, t_mapping, relation_mask]:
+                mapping.zero_()
+
+            ht_pair_pos.zero_()
+
+            sent_idxs.zero_()
+            sent_idxs -= 1
+            reverse_sent_idxs.zero_()
+            reverse_sent_idxs -= 1
+
+            max_h_t_cnt = 1
+
+            cur_batch.sort(key=lambda x: np.sum(self.data_test_word[x] > 0), reverse=True)
+
+            labels = []
+
+            L_vertex = []
+            titles = []
+            indexes = []
+
+            evi_nums = []
+
+            for i, index in enumerate(cur_batch):
+                # context_idxs[i].copy_(torch.from_numpy(self.data_test_word[index, :]))
+                context_idxs[i].copy_(torch.from_numpy(self.data_test_bert_word[index, :]))
+                context_pos[i].copy_(torch.from_numpy(self.data_test_pos[index, :]))
+                context_char_idxs[i].copy_(torch.from_numpy(self.data_test_char[index, :]))
+                context_ner[i].copy_(torch.from_numpy(self.data_test_ner[index, :]))
+
+                context_masks[i].copy_(torch.from_numpy(self.data_test_bert_mask[index, :]))
+                context_starts[i].copy_(torch.from_numpy(self.data_test_bert_starts[index, :]))
+
+                idx2label = defaultdict(list)
+                ins = self.test_file[index]
+                this_sent_idxs, this_reverse_sent_idxs = self.load_sent_idx(ins)
+                sent_idxs[i].copy_(torch.from_numpy(this_sent_idxs))
+                reverse_sent_idxs[i].copy_(torch.from_numpy(this_reverse_sent_idxs))
+
+                for label in ins['labels']:
+                    idx2label[(label['h'], label['t'])].append(label['r'])
+
+                L = len(ins['vertexSet'])
+                titles.append(ins['title'])
+
+                j = 0
+                for h_idx in range(L):
+                    for t_idx in range(L):
+                        if h_idx != t_idx:
+                            hlist = ins['vertexSet'][h_idx]
+                            tlist = ins['vertexSet'][t_idx]
+
+                            for h in hlist:
+                                h_mapping[i, j, h['pos'][0]:h['pos'][1]] = 1.0 / len(hlist) / (
+                                            h['pos'][1] - h['pos'][0])
+                            for t in tlist:
+                                t_mapping[i, j, t['pos'][0]:t['pos'][1]] = 1.0 / len(tlist) / (
+                                            t['pos'][1] - t['pos'][0])
+
+                            relation_mask[i, j] = 1
+
+                            delta_dis = hlist[0]['pos'][0] - tlist[0]['pos'][0]
+                            if delta_dis < 0:
+                                ht_pair_pos[i, j] = -int(self.dis2idx[-delta_dis])
+                            else:
+                                ht_pair_pos[i, j] = int(self.dis2idx[delta_dis])
+                            j += 1
+
+                max_h_t_cnt = max(max_h_t_cnt, j)
+                label_set = {}
+                evi_num_set = {}
+                for label in ins['labels']:
+                    label_set[(label['h'], label['t'], label['r'])] = label[
+                        'in' + self.train_prefix]  # label_triple + if in train dataset
+                    evi_num_set[(label['h'], label['t'], label['r'])] = len(label['evidence'])
+
+                labels.append(label_set)
+                evi_nums.append(evi_num_set)
+
+                L_vertex.append(L)
+                indexes.append(index)
+
+            input_lengths = (context_idxs[:cur_bsz] > 0).long().sum(dim=1)
+            max_c_len = int(input_lengths.max())
+            sent_lengths = (sent_idxs[:cur_bsz] > 0).long().sum(-1)
+
+            yield {'context_idxs': context_idxs[:cur_bsz, :max_c_len].contiguous(),
+                   'context_pos': context_pos[:cur_bsz, :max_c_len].contiguous(),
+                   'h_mapping': h_mapping[:cur_bsz, :max_h_t_cnt, :max_c_len],
+                   't_mapping': t_mapping[:cur_bsz, :max_h_t_cnt, :max_c_len],
+                   'labels': labels,
+                   'L_vertex': L_vertex,
+                   'input_lengths': input_lengths,
+                   'context_ner': context_ner[:cur_bsz, :max_c_len].contiguous(),
+                   'context_char_idxs': context_char_idxs[:cur_bsz, :max_c_len].contiguous(),
+                   'relation_mask': relation_mask[:cur_bsz, :max_h_t_cnt],
+                   'titles': titles,
+                   'ht_pair_pos': ht_pair_pos[:cur_bsz, :max_h_t_cnt],
+                   'indexes': indexes,  # absolute index of all data
+                   'sent_idxs': sent_idxs[:cur_bsz],
+                   'sent_lengths': sent_lengths[:cur_bsz],
+                   'reverse_sent_idxs': reverse_sent_idxs[:cur_bsz, :max_c_len],
+                   'context_masks': context_masks[:cur_bsz, :max_c_len].contiguous(),
+                   'context_starts': context_starts[:cur_bsz, :max_c_len].contiguous(),
+                   'evi_num_set': evi_nums,
+                   }
+
+
+
+

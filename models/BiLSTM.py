@@ -163,9 +163,9 @@ class BiLSTM(nn.Module):
         if self.use_entity_type:
             context_output = torch.cat([context_output, self.ner_emb(context_ner)], dim=-1)
         '''
-        #context_output = self.linear_re(context_output)
+        context_output = self.linear_re(context_output)
         #context_output = self.linear_re_type(context_output)
-        context_output = torch.relu(self.linear_re(context_output))
+        #context_output = torch.relu(self.linear_re(context_output))
 
         # h_mapping[batchs_size, num_of_train_triple, max_length(512)]
         # context_output.size()[batch_size, max_length, dim]

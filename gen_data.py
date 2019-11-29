@@ -116,7 +116,7 @@ def init(data_file_name, rel2id, max_length = 512, is_training = True, suffix=''
         item['labels'] = new_labels
         item['title'] = ori_data[i]['title']
 
-        na_triple = []
+        na_triple = [] # because there are no labels in dev_test, and thus there are no train triples
         for j in range(len(vertexSet)):
             for k in range(len(vertexSet)):
                 if (j != k):
